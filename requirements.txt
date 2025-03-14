@@ -1,0 +1,8 @@
+torch
+torch-cosine-annealing
+tqdm
+pyyaml
+tensorboard
+optuna
+numpy
+optuna-dashboard
