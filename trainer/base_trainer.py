@@ -2,6 +2,7 @@ import time
 import os
 import torch as T
 import yaml
+import deepspeed
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from typing import Dict
@@ -53,22 +54,21 @@ class Tracker:
         }
 
 class BaseTrainer(ABC):
-    def __init__(self, model: T.nn.Module, gpu_id: int, args: Dict, log_enabled: bool = True, is_eval: bool = False):
+    def __init__(self, model: T.nn.Module, local_rank: int, global_rank: int, args: Dict, log_enabled: bool = True, is_eval: bool = False):
         self.logger = get_logger(__class__.__name__) if self.logger is None else self.logger
         self.model = model
         self.args = args
-        self.gpu_id = gpu_id
+        self.local_rank = local_rank
+        self.global_rank = global_rank
         self.log_enabled = log_enabled
         self.is_eval = is_eval
-
+        
         self.uid = args['train']['uid'] if args['train']['uid'] is not None else int(time.time())
         args['train']['uid'] = self.uid
         self.loss_fn = self._get_loss_fn()
 
-        if not is_eval:
-            self.optim = self._get_optimizer()
-            self.scaler = T.GradScaler('cuda')
-            self.scheduler = self._get_scheduler()
+        self.optim = self._get_optimizer() if not is_eval else None
+        self.scheduler = self._get_scheduler()  if not is_eval else None
 
         if self.can_log:
             self.log_dir = os.path.join(args['train']['log_dir'], f'{self.uid}')
@@ -79,13 +79,17 @@ class BaseTrainer(ABC):
             self.save_config()
 
         self.tracker = Tracker()
-        self.model = self.model.to(self.gpu_id)
-        if not args['train']['no_ddp']:
-            self.model = DDP(self.model, device_ids=[self.gpu_id])
+        self.model, self.optim, _, self.scheduler = deepspeed.initialize(
+            config=args['train']['deepspeed'],
+            model=self.model,
+            model_parameters=model.parameters(), 
+            optimizer=self.optim,
+            lr_scheduler=self.scheduler
+        )
     
     @property
     def is_main_process(self):
-        return self.gpu_id == 0
+        return self.global_rank == 0
 
     @property
     def can_log(self):
@@ -175,19 +179,13 @@ class BaseTrainer(ABC):
         self.logger.info('Training Phase')
         self.model.train()
 
-        if not self.args['train']['no_ddp']:
-            dl.sampler.set_epoch(epoch)
-
-        batch_losses = T.zeros(2, device=self.gpu_id)
+        batch_losses = T.zeros(2, device=self.local_rank)
         pbar = tqdm(dl, disable=not self.is_main_process)
 
         for i, batch_data in enumerate(pbar):
             b_loss = self.step(*batch_data)
-            self.optim.zero_grad()
-            self.scaler.scale(b_loss).backward()
-            self.scaler.step(self.optim)
-            self.scaler.update()
-            self.scheduler.step()
+            self.model.backward(b_loss)
+            self.model.step()
 
             for k in range(len(self.optim.param_groups)):
                 self.write_summary(f'LR Scheduler/{k}', self.optim.param_groups[k]['lr'], self.tracker.step_counter)
@@ -197,13 +195,12 @@ class BaseTrainer(ABC):
             yield i
             
             if not self.is_main_process:  # reset for gpu rank > 0
-                batch_losses = T.zeros(2, device=self.gpu_id)
+                batch_losses = T.zeros(2, device=self.local_rank)
 
             batch_losses[0] += b_loss
             batch_losses[1] += 1
 
-            if not self.args['train']['no_ddp']:
-                T.distributed.reduce(batch_losses, dst=0)
+            T.distributed.reduce(batch_losses, dst=0)
             avg_losses = batch_losses[0] / batch_losses[1]
             
             pbar.set_postfix({'Loss': f'{avg_losses:.4f}'})
@@ -217,10 +214,7 @@ class BaseTrainer(ABC):
         self.logger.info('Validation Phase')
         self.model.eval()
 
-        if not self.args['train']['no_ddp']:
-            dl.sampler.set_epoch(epoch)
-
-        batch_losses = T.zeros(2, device=self.gpu_id)
+        batch_losses = T.zeros(2, device=self.local_rank)
         pbar = tqdm(dl, disable=not self.is_main_process)
 
         for batch_data in pbar:
@@ -228,19 +222,17 @@ class BaseTrainer(ABC):
             self.tracker.inc_val_step_counter()
             
             if not self.is_main_process:  # reset for gpu rank > 0
-                batch_losses = T.zeros(2, device=self.gpu_id)
+                batch_losses = T.zeros(2, device=self.local_rank)
 
             batch_losses[0] += b_loss
             batch_losses[1] += 1
 
-            if not self.args['train']['no_ddp']:
-                T.distributed.reduce(batch_losses, dst=0)
+            T.distributed.reduce(batch_losses, dst=0)
             avg_losses = batch_losses[0] / batch_losses[1]
             
             pbar.set_postfix({'Loss': f'{avg_losses:.4f}'})
 
-        if not self.args['train']['no_ddp']:
-            T.distributed.broadcast(avg_losses, src=0)
+        T.distributed.broadcast(avg_losses, src=0)
 
         self.tracker.last_loss = avg_losses.item()
         self.tracker.last_metric = avg_losses.item()
