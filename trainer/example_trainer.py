@@ -13,9 +13,9 @@ from trainer.base_trainer import BaseTrainer, Tracker
 from torch_cosine_annealing import CosineAnnealingWithWarmRestarts
 
 class ExampleTrainer(BaseTrainer):
-    def __init__(self, model: T.nn.Module, gpu_id: int, args: Dict, log_enabled: bool = True, is_eval: bool = False):
-        self.logger = get_logger(__class__.__name__, gpu_id)
-        super().__init__(model, gpu_id, args, log_enabled, is_eval)
+    def __init__(self, model: T.nn.Module, local_rank: int, global_rank: int, args: Dict, log_enabled: bool = True, is_eval: bool = False):
+        self.logger = get_logger(__class__.__name__, global_rank)
+        super().__init__(model, local_rank, global_rank, args, log_enabled, is_eval)
         self.tracker = Tracker(direction='min')
     
     def _get_optimizer(self) -> T.optim.Optimizer:
@@ -35,13 +35,11 @@ class ExampleTrainer(BaseTrainer):
         return T.nn.MSELoss()
 
     def step(self, *batch_data) -> T.Tensor:
-        x, y = batch_data
-        batch_data = [x.to(self.gpu_id) for x in batch_data if type(x) == T.Tensor]
+        batch_data = [x.to(self.local_rank) for x in batch_data if type(x) == T.Tensor]
 
         x, y = batch_data
 
-        with T.autocast('cuda'):
-            y_pred = self.model(x)
-            loss = self.loss_fn(y_pred, y)
+        y_pred = self.model(x)
+        loss = self.loss_fn(y_pred, y)
 
         return loss
