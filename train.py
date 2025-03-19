@@ -5,6 +5,7 @@ import random
 import torch as T
 import numpy as np
 import torch.multiprocessing as mp
+import deepspeed
 from typing import Dict
 from utils.logger import *
 from torch.distributed import init_process_group, destroy_process_group
@@ -14,24 +15,23 @@ from data.example_data import ExampleData
 from model.example_model import ExampleModel
 from trainer.example_trainer import ExampleTrainer
 
-def ddp_setup(rank: int, world_size: int, port):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = port
-    T.cuda.set_device(rank)
-    T.cuda.empty_cache()
-    init_process_group('nccl', rank=rank, world_size=world_size)
-
-def main(rank: int, world_size: int, train_args: Dict, port: int):
+def main(train_args: Dict):
     setup_logging()
     seed_everything(train_args['train']['seed'])
-    if not train_args['train']['no_ddp']:
-        ddp_setup(rank, world_size, port)
+    deepspeed.init_distributed()
     
+    rank = int(os.environ['LOCAL_RANK'])
     logger = get_logger(__name__, rank)
 
     logger.info('Instantiating model and trainer agent')
     model = ExampleModel(**train_args['model'])
-    trainer = ExampleTrainer(model, rank, train_args, log_enabled=not train_args['train']['no_save'])
+    trainer = ExampleTrainer(
+        model, 
+        int(os.environ['LOCAL_RANK']), 
+        int(os.environ['RANK']),
+        train_args, 
+        log_enabled=not train_args['train']['no_save']
+    )
 
     logger.info('Preparing dataset')
     train_dataset = ExampleData(**train_args['data'], validation=False)
@@ -39,37 +39,35 @@ def main(rank: int, world_size: int, train_args: Dict, port: int):
     logger.info(f'Train dataset size: {len(train_dataset)}')
     logger.info(f'Val dataset size: {len(val_dataset)}')
 
+    world_size = int(os.environ['WORLD_SIZE'])
+    grad_acc_steps = train_args['train']['deepspeed']['gradient_accumulation_steps']
+    micro_batch_size = train_args['train']['deepspeed']['train_micro_batch_size_per_gpu']
     logger.info(f'Using {world_size} GPU(s)')
+    logger.info(f'Gradient accumulation steps: {grad_acc_steps}')
+    logger.info(f'Batch size each GPU: {micro_batch_size}')
+    logger.info(f'Actual batch size: {world_size * micro_batch_size * grad_acc_steps}')
+    
     if train_args['train'].get('model_path') is not None:
         trainer.load_checkpoint(train_args['model_path'])
-
-    if not train_args['train']['batch_size'] % world_size == 0:
-        logger.error(f'Batch size {train_args['train']['batch_size']} must be divisible by the number of GPUs {world_size}')
-
-    logger.info('Instantiating dataloader')
+    
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=train_args['train']['batch_size'] // world_size,
-        shuffle=True if train_args['train']['no_ddp'] else False,
+        batch_size=micro_batch_size,
+        shuffle=True,
         num_workers=train_args['train']['n_workers'],
         pin_memory=True,
-        sampler=None if train_args['train']['no_ddp'] else DistributedSampler(train_dataset),
         persistent_workers=True,
     )
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=train_args['train']['batch_size'] // world_size,
+        batch_size=micro_batch_size,
         shuffle=False,
         num_workers=train_args['train']['n_workers'],
         pin_memory=True,
-        sampler=None if train_args['train']['no_ddp'] else DistributedSampler(val_dataset),
         persistent_workers=True,
     )
 
     trainer.do_training(train_dataloader, val_dataloader)
-
-    if not train_args['train']['no_ddp']:
-        destroy_process_group()
 
 def seed_everything(seed: int):    
     random.seed(seed)
@@ -89,6 +87,9 @@ def get_args_parser():
     parser.add_argument('--port', type=int, help='DDP port', default=None)
     parser.add_argument('--no-ddp', action='store_true', help='disable DDP')
     parser.add_argument('--no-save', action='store_true', help='disable logging and checkpoint saving (for debugging)')
+    parser.add_argument('--local_rank', type=int, help='local rank (automatically set)')
+
+    parser = deepspeed.add_config_arguments(parser)
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -107,10 +108,5 @@ if __name__ == '__main__':
         train_args['train']['patience'] = args.patience 
     train_args['train']['no_ddp'] = args.no_ddp
     train_args['train']['no_save'] = args.no_save
-
-    if not train_args['train']['no_ddp']:
-        world_size = T.cuda.device_count()
-        port = str(random.randint(10000, 60000)) if args.port is None else str(args.port)
-        mp.spawn(main, nprocs=world_size, args=(world_size, train_args, port))
-    else:
-        main(0, 1, train_args, 0)
+    
+    main(train_args)
