@@ -4,12 +4,11 @@ import torch as T
 import yaml
 import deepspeed
 from abc import abstractmethod, ABC
+from deepspeed import DeepSpeedEngine
 from dataclasses import dataclass
 from typing import Dict
 from tqdm import tqdm
-from collections import deque
 from torch.utils.tensorboard import SummaryWriter
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from constants import *
 from utils.logger import get_logger
@@ -86,6 +85,7 @@ class BaseTrainer(ABC):
             optimizer=self.optim,
             lr_scheduler=self.scheduler
         )
+        self.model: DeepSpeedEngine
     
     @property
     def is_main_process(self):
@@ -136,40 +136,16 @@ class BaseTrainer(ABC):
             yaml.dump(config, f)
         self.logger.info(f'Training config saved to {config_path}')
 
-    def save_checkpoint(self, epoch: int, name: str = '', only_model: bool = True):
-        if not self.can_log:
-            return
-        
-        if self.args['train']['no_ddp']:
-            save_checkpoint = {'model': self.model.state_dict()}
-        else:
-            save_checkpoint = {'model': self.model.module.state_dict()}
-            
-        if not only_model:
-            save_checkpoint['optimizer'] = self.optim.state_dict()
-            save_checkpoint['scheduler'] = self.scheduler.state_dict()
+    def save_checkpoint(self, epoch: int, name: str = ''):
         if name != '':
-            ckpt_path = os.path.join(self.ckpt_dir, f'{name}.pt')
+            ckpt_id = name
         else:
-            ckpt_path = os.path.join(self.ckpt_dir, f'epoch{epoch:02}_metric{self.tracker.last_metric:.4f}.pt')
-
-        T.save(save_checkpoint, ckpt_path)
-        self.logger.info(f'Checkpoint saved to {ckpt_path}')
+            ckpt_id = f'epoch{epoch:02}_metric{self.tracker.last_metric:.4f}'
+        self.model.save_checkpoint(self.ckpt_dir, ckpt_id)
     
-    def load_checkpoint(self, ckpt_path: str):
-        assert os.path.exists(ckpt_path)
-        checkpoint = T.load(ckpt_path, map_location='cpu')
-
-        if self.args['train']['no_ddp']:
-            self.model.load_state_dict(checkpoint['model'])
-        else:
-            self.model.module.load_state_dict(checkpoint['model'])
-            
-        if 'optimizer' in checkpoint:
-            self.optim.load_state_dict(checkpoint['optimizer'])
-        if 'scheduler' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler'])
-        self.logger.info(f'Succesfully loaded model in {ckpt_path}')
+    def load_checkpoint(self, ckpt_dir: str, ckpt_id: str):
+        assert os.path.exists(ckpt_dir)
+        self.model.load_checkpoint(ckpt_dir, ckpt_id)
 
     def train(self, dl: DataLoader, epoch: int):
         """
@@ -262,7 +238,7 @@ class BaseTrainer(ABC):
                             early_stop = True
                             break
 
-            self.logger.info(f'Epoch complete\n')
+            self.logger.info('Epoch Complete\n')
 
             if early_stop:
                 self.logger.info(f'Early stopping. No improvement in validation metric for the last {patience} epochs.')
