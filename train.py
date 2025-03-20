@@ -20,8 +20,7 @@ def main(train_args: Dict):
     seed_everything(train_args['train']['seed'])
     deepspeed.init_distributed()
     
-    rank = int(os.environ['LOCAL_RANK'])
-    logger = get_logger(__name__, rank)
+    logger = get_logger(__name__, int(os.environ['RANK']))
 
     logger.info('Instantiating model and trainer agent')
     model = ExampleModel(**train_args['model'])
