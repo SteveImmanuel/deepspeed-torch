@@ -4,12 +4,9 @@ import yaml
 import random
 import torch as T
 import numpy as np
-import torch.multiprocessing as mp
 import deepspeed
 from typing import Dict
 from utils.logger import *
-from torch.distributed import init_process_group, destroy_process_group
-from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from data.example_data import ExampleData
 from model.example_model import ExampleModel
@@ -83,7 +80,6 @@ def get_args_parser():
     parser.add_argument('--model-path', type=str, help='ckpt path to continue', default=None)
     parser.add_argument('--patience', type=int, help='patience for early stopping', default=-1)
     parser.add_argument('--seed', type=int, help='random seed', default=None)
-    parser.add_argument('--port', type=int, help='DDP port', default=None)
     parser.add_argument('--no-ddp', action='store_true', help='disable DDP')
     parser.add_argument('--no-save', action='store_true', help='disable logging and checkpoint saving (for debugging)')
     parser.add_argument('--local_rank', type=int, help='local rank (automatically set)')
