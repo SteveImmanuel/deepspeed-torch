@@ -1,9 +1,8 @@
-# QuickTorch
+# DeepSpeed Torch
 PyTorch framework to handle all boilerplate code for training deep learning models. This framework is built with research in mind and is designed to be easily adopted so you can focus simply on handling the actual model architetecture and dataloading. 
 
-This code is **battle-tested** and has been used in almost all [my publications and winning submissions](https://steveimm.id/) in various competitions.
-
 Main features:
+- DeepSpeed integration for large-scale training
 - Flexible, modular, and transparent
 - Support distributed training
 - Support logging, checkpointing
@@ -11,10 +10,17 @@ Main features:
 - Deterministic training
 - Automatic hyperparameter search
 
+
+>⚠️ **WARNING:**
+>- This framework is currently in **experimental** stage and is not yet fully tested
+>- For a robust framework, consider [QuickTorch](https://github.com/SteveImmanuel/quick-torch), which this framework is built upon
+
+
 ## Installation
-Install all dependencies by running:
+Install all dependencies using conda by running:
 ```bash
-pip install -r requirements.txt
+conda env create -f env.yaml
+conda activate dtorch
 ```
 
 ## Code Structure
@@ -52,27 +58,28 @@ train:
   eval_per_epoch: <number of evaluation per epoch>
   patience: <number of epochs to wait before early stopping>
   epoch: <number of epochs to train>
-  batch_size: <batch size>
   n_workers: <number of workers for dataloader>
   ckpt_interval: <number of epochs between saving checkpoints>
+  deepspeed:
+    <define all deepspeed related parameters here>
 
 data:
   <define all data related parameters here>
 ```
 
+For the DeepSpeed configuration, you can refer to the [official documentation](https://www.deepspeed.ai/docs/config-json/), just write it in `yaml` format.
+
 ## Training
 Training script can be derived from [train.py](train.py). You need to modify the `model`, `trainer`, `train_dataset`, and `val_dataset` to your implementation. To run the training, simply run:
 ```bash
-python train.py --config <path to yaml config file> --uid <unique id for the run>
+deepspeed train.py --config <path to yaml config file> --uid <unique id for the run>
 ```
 
-By default, the training script will utilize all available GPUs. If you want to run on some particular GPUs, you can set the `CUDA_VISIBLE_DEVICES` environment variable. 
-
-On the other hand, if you want to only run in a single GPU, add a `--no-ddp` flag. This will disable the distributed training and make the training faster (if dataloading is the bottleneck) because it does not need to configure communications, sampling, and synching between GPUs.
+By default, the training script will utilize all available GPUs. If you want to run on some particular GPUs, you can set the `CUDA_VISIBLE_DEVICES` environment variable or use the `--num_gpus` flag. 
 
 To disable logging and checkpoint to the log directory, add a `--no-save` flag. This is useful for debugging so that you don't create multiple log files.
 
-## Hyperparameter Search
+<!-- ## Hyperparameter Search
 You need to configure which hyperparameters to search and all the candidate values in the script. The script can be run by:
 ```bash
 python hyptune.py --config <path to yaml config file> --study-name <name of the study>
@@ -83,7 +90,8 @@ See [hyptune.py](hyptune.py) for an example.
 To see the results of the hyperparameter search, run:
 ```bash
 optuna-dashboard sqlite:///<name of the study>.db --host 0.0.0.0
-```
+``` -->
+
 ## Logging
 Tensorboard is utilized for logging. To see the logs, run:
 ```bash
